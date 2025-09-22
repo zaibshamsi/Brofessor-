@@ -1,0 +1,5 @@
+{
+  "name": "AI Database Chatbot",
+  "description": "An AI-powered chatbot that answers user questions by retrieving information from a private database and using Gemini to formulate the final answer based only on that data.",
+  "requestFramePermissions": []
+}
