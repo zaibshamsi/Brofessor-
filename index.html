@@ -1,12 +1,33 @@
-
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="h-full">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>AI Database Chatbot</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      /* Custom Scrollbar for Webkit-based browsers (Chrome, Safari, Edge) */
+      ::-webkit-scrollbar {
+        width: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: #1f2937; /* bg-gray-800 */
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #4338ca; /* bg-indigo-700 */
+        border-radius: 4px;
+        border: 2px solid #1f2937; /* bg-gray-800 */
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #4f46e5; /* bg-indigo-600 */
+      }
+      /* Custom Scrollbar for Firefox */
+      * {
+        scrollbar-width: thin;
+        scrollbar-color: #4338ca #1f2937;
+      }
+    </style>
   <script type="importmap">
 {
   "imports": {
@@ -19,8 +40,8 @@
 }
 </script>
 </head>
-  <body class="bg-gray-900">
-    <div id="root"></div>
+  <body class="bg-gray-900 h-full">
+    <div id="root" class="h-full"></div>
     <script type="module" src="/index.tsx"></script>
   </body>
 </html>

@@ -35,5 +35,6 @@ export interface KnowledgeBaseContextType {
     knowledgeContext: string;
     knowledgeFiles: KnowledgeFile[];
     updateKnowledgeBase: (contentToAppend: string, filesToAppend: KnowledgeFile[]) => Promise<void>;
+    deleteKnowledgeFile: (fileName: string) => Promise<void>;
     isLoading: boolean;
 }

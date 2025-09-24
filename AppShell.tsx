@@ -104,8 +104,40 @@ const AppShell: React.FC = () => {
         setKnowledgeFiles(newFiles);
     }, []);
 
+    const deleteKnowledgeFile = useCallback(async (fileName: string) => {
+        setIsKbLoading(true);
+        try {
+            const currentKb = await knowledgeBaseService.getKnowledgeBase();
+    
+            const newFiles = currentKb.files.filter(f => f.name !== fileName);
+    
+            // Reconstruct the content string by removing the corresponding file block
+            const blocks = currentKb.content.split(/(--- FILE: .*? ---\n)/).filter(Boolean);
+            const newContentParts: string[] = [];
+            for (let i = 0; i < blocks.length; i += 2) {
+                const header = blocks[i];
+                const content = blocks[i + 1] || '';
+                if (header && !header.includes(`--- FILE: ${fileName} ---`)) {
+                    newContentParts.push(header, content);
+                }
+            }
+            
+            const newContent = newContentParts.join('').trim();
+    
+            await knowledgeBaseService.setKnowledgeBase(newContent, newFiles);
+    
+            setKnowledgeContext(newContent);
+            setKnowledgeFiles(newFiles);
+        } catch (error) {
+            console.error("Failed to delete knowledge file:", error);
+            throw error; // Re-throw to allow UI to handle it
+        } finally {
+            setIsKbLoading(false);
+        }
+    }, []);
+
     const authContextValue = { currentUser, login, register, logout };
-    const kbContextValue = { knowledgeContext, knowledgeFiles, updateKnowledgeBase, isLoading: isKbLoading };
+    const kbContextValue = { knowledgeContext, knowledgeFiles, updateKnowledgeBase, deleteKnowledgeFile, isLoading: isKbLoading };
     
     const renderContent = () => {
         if (isAuthLoading) {

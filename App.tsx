@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useContext } from 'react';
+import React, { useState, useRef, useEffect, useContext, useCallback } from 'react';
 import { Message, KnowledgeFile, ProcessedFileResult } from './types';
 import { getAiResponse } from './services/geminiService';
 import BotIcon from './components/icons/BotIcon';
@@ -7,6 +7,54 @@ import SendIcon from './components/icons/SendIcon';
 import KnowledgeBaseModal from './components/KnowledgeBaseModal';
 import { AuthContext, KnowledgeBaseContext } from './AppShell';
 import { AuthContextType, KnowledgeBaseContextType } from './types';
+import MicrophoneIcon from './components/icons/MicrophoneIcon';
+import RefreshIcon from './components/icons/RefreshIcon';
+import DotsVerticalIcon from './components/icons/DotsVerticalIcon';
+
+// Fix: Add type definitions for the experimental SpeechRecognition API
+// This is to resolve TypeScript errors for a non-standard browser API.
+interface SpeechRecognition extends EventTarget {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onstart: (() => void) | null;
+  onend: (() => void) | null;
+  onerror: ((event: SpeechRecognitionErrorEvent) => void) | null;
+  onresult: ((event: SpeechRecognitionEvent) => void) | null;
+  start: () => void;
+  stop: () => void;
+}
+
+interface SpeechRecognitionEvent extends Event {
+  readonly resultIndex: number;
+  readonly results: SpeechRecognitionResultList;
+}
+
+interface SpeechRecognitionResultList {
+  readonly length: number;
+  item(index: number): SpeechRecognitionResult;
+  [index: number]: SpeechRecognitionResult;
+}
+
+interface SpeechRecognitionResult {
+  readonly isFinal: boolean;
+  readonly [index: number]: SpeechRecognitionAlternative;
+}
+
+interface SpeechRecognitionAlternative {
+  readonly transcript: string;
+}
+
+interface SpeechRecognitionErrorEvent extends Event {
+  readonly error: string;
+}
+
+declare global {
+  interface Window {
+    SpeechRecognition: { new(): SpeechRecognition };
+    webkitSpeechRecognition: { new(): SpeechRecognition };
+  }
+}
 
 const App: React.FC = () => {
   const { currentUser, logout } = useContext(AuthContext) as AuthContextType;
@@ -16,21 +64,86 @@ const App: React.FC = () => {
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isKbModalOpen, setIsKbModalOpen] = useState(false);
+  const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  
+  const [isListening, setIsListening] = useState(false);
+  const [speechApiSupported, setSpeechApiSupported] = useState(false);
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
+
+  const getInitialMessage = useCallback((): Message => {
+    const welcomeText = knowledgeContext 
+      ? "Welcome! I'm Brofessor, your university assistant. Ask me anything about the documents in my knowledge base."
+      : "Hello! The knowledge base is empty. An administrator needs to upload documents to get started.";
+    
+    return {
+      id: 'initial-ai-message-' + Date.now(),
+      text: welcomeText,
+      sender: 'ai',
+    };
+  }, [knowledgeContext]);
 
   useEffect(() => {
     if (!isKbLoading) {
-       const welcomeText = knowledgeContext 
-        ? `Hello! The knowledge base is loaded from ${knowledgeFiles.filter(f => f.status === 'processed').length} file(s). Ask me anything about the content.`
-        : "Hello! The knowledge base is empty. An administrator needs to upload documents to get started.";
-      
-      setMessages([{
-        id: 'initial-ai-message',
-        text: welcomeText,
-        sender: 'ai',
-      }]);
+      setMessages([getInitialMessage()]);
     }
-  }, [isKbLoading, knowledgeContext, knowledgeFiles]);
+  }, [isKbLoading, getInitialMessage]);
+
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (SpeechRecognition) {
+        setSpeechApiSupported(true);
+        const recognition = new SpeechRecognition();
+        recognition.continuous = false;
+        recognition.interimResults = true;
+        recognition.lang = 'en-US';
+
+        recognition.onstart = () => setIsListening(true);
+        recognition.onend = () => setIsListening(false);
+        recognition.onerror = (event) => {
+            console.error('Speech recognition error:', event.error);
+            setIsListening(false);
+        };
+
+        recognition.onresult = (event) => {
+            let interimTranscript = '';
+            let finalTranscript = '';
+
+            for (let i = event.resultIndex; i < event.results.length; ++i) {
+                if (event.results[i].isFinal) {
+                    finalTranscript += event.results[i][0].transcript;
+                } else {
+                    interimTranscript += event.results[i][0].transcript;
+                }
+            }
+            setInputValue(prev => prev + finalTranscript);
+        };
+
+        recognitionRef.current = recognition;
+    } else {
+        console.warn("Speech Recognition API is not supported in this browser.");
+        setSpeechApiSupported(false);
+    }
+
+    return () => {
+        recognitionRef.current?.stop();
+    };
+  }, []);
+  
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+        if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+            setIsDropdownOpen(false);
+        }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+        document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, []);
 
 
   const scrollToBottom = () => {
@@ -39,6 +152,14 @@ const App: React.FC = () => {
 
   useEffect(scrollToBottom, [messages, isLoading]);
   
+  useEffect(() => {
+    // Refocus the input after the AI has responded and is no longer loading,
+    // but not if the user is currently using voice input.
+    if (!isLoading && !isListening) {
+      inputRef.current?.focus();
+    }
+  }, [isLoading, isListening]);
+
   const handleFilesProcessed = async (results: ProcessedFileResult[]) => {
     setIsKbModalOpen(false);
 
@@ -93,12 +214,13 @@ const App: React.FC = () => {
       sender: 'user',
     };
 
-    setMessages((prevMessages) => [...prevMessages, userMessage]);
+    const newMessages = [...messages, userMessage];
+    setMessages(newMessages);
     setInputValue('');
     setIsLoading(true);
 
     try {
-      const aiResponseText = await getAiResponse(trimmedInput, knowledgeContext);
+      const aiResponseText = await getAiResponse(newMessages, trimmedInput, knowledgeContext);
       
       const aiMessage: Message = {
         id: (Date.now() + 1).toString(),
@@ -117,39 +239,91 @@ const App: React.FC = () => {
       setIsLoading(false);
     }
   };
+  
+  const handleToggleListening = () => {
+    if (!recognitionRef.current) return;
+
+    if (isListening) {
+      recognitionRef.current.stop();
+    } else {
+      recognitionRef.current.start();
+    }
+  };
+
+  const handleRefreshChat = () => {
+    setIsLoading(false);
+    if (isListening) {
+      recognitionRef.current?.stop();
+    }
+    setInputValue('');
+    setMessages([getInitialMessage()]);
+  };
 
   return (
     <>
-      <div className="flex flex-col h-screen bg-gray-900 text-white font-sans">
-        <header className="bg-gray-800 shadow-md p-4 border-b border-gray-700 flex justify-between items-center">
-          <h1 className="text-xl font-bold text-gray-100">AI Document Assistant</h1>
-          <div className="flex items-center gap-4">
-            <div className="text-right">
-              <p className="text-sm text-gray-300">{currentUser?.email}</p>
-              <p className="text-xs text-indigo-400 font-semibold uppercase">{currentUser?.role}</p>
+      <div className="flex flex-col h-full bg-gray-900 text-white font-sans overflow-hidden">
+        <header className="flex-shrink-0 bg-gray-800 shadow-md p-4 border-b border-gray-700 flex justify-between items-center">
+            <div className="flex items-center gap-3">
+                <h1 className="text-xl font-bold text-gray-100">Brofessor</h1>
+                <button
+                    onClick={handleRefreshChat}
+                    className="text-gray-400 hover:text-white p-2 rounded-full hover:bg-gray-700 transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-800 focus:ring-indigo-500"
+                    aria-label="Start new chat"
+                >
+                    <RefreshIcon className="w-5 h-5" />
+                </button>
             </div>
-             {currentUser?.role === 'admin' && (
-              <button 
-                onClick={() => setIsKbModalOpen(true)}
-                className="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-500 transition-colors duration-200 text-sm font-semibold"
-              >
-                Manage Knowledge Base
-              </button>
-            )}
-            <button
-                onClick={logout}
-                className="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-500 transition-colors duration-200 text-sm font-semibold"
-            >
-                Logout
-            </button>
-          </div>
+
+            <div className="relative" ref={dropdownRef}>
+                <button
+                    onClick={() => setIsDropdownOpen(prev => !prev)}
+                    className="flex items-center text-left p-2 rounded-full hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-800 focus:ring-indigo-500"
+                    aria-haspopup="true"
+                    aria-expanded={isDropdownOpen}
+                >
+                    <DotsVerticalIcon className="w-6 h-6 text-gray-300" />
+                </button>
+
+                {isDropdownOpen && (
+                    <div className="absolute right-0 mt-2 w-56 bg-gray-700 rounded-md shadow-lg z-10 origin-top-right ring-1 ring-black ring-opacity-5 focus:outline-none">
+                        <div className="py-1" role="menu" aria-orientation="vertical" aria-labelledby="menu-button">
+                            <div className="px-4 py-3 border-b border-gray-600">
+                                <p className="text-sm font-medium text-gray-200 truncate" id="menu-item-user-email">{currentUser?.email}</p>
+                                <p className="text-xs text-indigo-400 font-semibold uppercase">{currentUser?.role}</p>
+                            </div>
+                            {currentUser?.role === 'admin' && (
+                                <button
+                                    onClick={() => {
+                                        setIsKbModalOpen(true);
+                                        setIsDropdownOpen(false);
+                                    }}
+                                    className="w-full text-left px-4 py-3 text-sm text-gray-200 hover:bg-gray-600 flex items-center gap-3"
+                                    role="menuitem"
+                                >
+                                    Manage KB
+                                </button>
+                            )}
+                            <button
+                                onClick={() => {
+                                    logout();
+                                    setIsDropdownOpen(false);
+                                }}
+                                className="w-full text-left px-4 py-3 text-sm text-gray-200 hover:bg-gray-600 flex items-center gap-3"
+                                role="menuitem"
+                            >
+                                Logout
+                            </button>
+                        </div>
+                    </div>
+                )}
+            </div>
         </header>
         
-        <main className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6">
+        <main className="flex-1 overflow-y-auto p-3 sm:p-4 md:p-6 space-y-4">
           {messages.map((message) => (
             <div
               key={message.id}
-              className={`flex items-start gap-3 max-w-xl ${
+              className={`flex items-start gap-3 max-w-[90%] sm:max-w-lg md:max-w-xl ${
                 message.sender === 'user' ? 'ml-auto flex-row-reverse' : 'mr-auto'
               }`}
             >
@@ -163,13 +337,13 @@ const App: React.FC = () => {
                     : 'bg-gray-700 rounded-bl-none'
                 }`}
               >
-                <p className="text-sm leading-relaxed whitespace-pre-wrap">{message.text}</p>
+                <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">{message.text}</p>
               </div>
             </div>
           ))}
 
           {isLoading && (
-            <div className="flex items-start gap-3 mr-auto max-w-xl">
+            <div className="flex items-start gap-3 mr-auto max-w-[90%] sm:max-w-lg md:max-w-xl">
                <div className="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center bg-indigo-500">
                  <BotIcon className="w-5 h-5 text-white" />
                </div>
@@ -185,20 +359,36 @@ const App: React.FC = () => {
           <div ref={messagesEndRef} />
         </main>
 
-        <footer className="p-4 bg-gray-800 border-t border-gray-700">
-          <form onSubmit={handleSendMessage} className="flex items-center max-w-3xl mx-auto">
+        <footer className="flex-shrink-0 p-2 sm:p-4 bg-gray-800 border-t border-gray-700">
+          <form onSubmit={handleSendMessage} className="flex items-center max-w-3xl mx-auto gap-2">
             <input
+              ref={inputRef}
               type="text"
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
-              placeholder={knowledgeContext ? "Ask a question about the documents..." : "Knowledge base is empty. Waiting for admin..."}
-              className="flex-1 w-full bg-gray-700 border border-gray-600 rounded-full py-3 px-5 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-shadow duration-200 disabled:opacity-50"
-              disabled={isLoading || !knowledgeContext}
+              placeholder={isListening ? "Listening..." : knowledgeContext ? "Ask a question..." : "Waiting for admin..."}
+              className="flex-1 w-full bg-gray-700 border border-gray-600 rounded-full py-2.5 px-4 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-shadow duration-200 disabled:opacity-50"
+              disabled={isLoading || !knowledgeContext || isListening}
             />
+            {speechApiSupported && (
+              <button
+                type="button"
+                onClick={handleToggleListening}
+                disabled={isLoading || !knowledgeContext}
+                className={`flex-shrink-0 text-white rounded-full h-10 w-10 flex items-center justify-center transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-800 focus:ring-indigo-500 ${
+                  isListening 
+                    ? 'bg-red-600 animate-pulse' 
+                    : 'bg-gray-600 hover:bg-gray-500'
+                } disabled:bg-gray-700 disabled:cursor-not-allowed`}
+                aria-label={isListening ? "Stop listening" : "Start voice input"}
+              >
+                <MicrophoneIcon className="w-5 h-5" />
+              </button>
+            )}
             <button
               type="submit"
               disabled={isLoading || !inputValue.trim() || !knowledgeContext}
-              className="ml-3 flex-shrink-0 bg-indigo-600 text-white rounded-full h-12 w-12 flex items-center justify-center hover:bg-indigo-500 disabled:bg-gray-600 disabled:cursor-not-allowed transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-800 focus:ring-indigo-500"
+              className="flex-shrink-0 bg-indigo-600 text-white rounded-full h-10 w-10 flex items-center justify-center hover:bg-indigo-500 disabled:bg-gray-600 disabled:cursor-not-allowed transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-800 focus:ring-indigo-500"
               aria-label="Send message"
             >
               <SendIcon className="w-5 h-5" />
