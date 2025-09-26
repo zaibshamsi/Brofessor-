@@ -1,28 +1,27 @@
+
 import { supabase } from './supabaseClient';
 import { User } from '../types';
 
 export const authService = {
-  // Get the current user from the session, including their role from the 'profiles' table
+  // Get the current user from the session, including their role
   getUser: async (): Promise<User | null> => {
     const { data: { session } } = await supabase.auth.getSession();
     if (!session?.user) return null;
 
-    // Fetch the user's profile to get their role
-    const { data: profile, error } = await supabase
-      .from('profiles')
-      .select('role')
-      .eq('id', session.user.id)
-      .single();
+    // Use a remote procedure call (RPC) to a database function to securely fetch the user's role.
+    // This bypasses potential RLS policies that might block direct table access.
+    const { data: role, error } = await supabase.rpc('get_my_role');
 
-    if (error && error.code !== 'PGRST116') { // PGRST116 means no rows found
-        console.error("Error fetching user profile:", error);
-        // Fallback to default user role if profile is missing
-        return { email: session.user.email!, role: 'user' };
+    if (error) {
+      console.error("Error fetching user role via RPC:", error);
+      // Fallback to default user role if the RPC call fails
+      return { id: session.user.id, email: session.user.email!, role: 'user' };
     }
     
     return {
+        id: session.user.id,
         email: session.user.email!,
-        role: profile?.role || 'user',
+        role: role || 'user',
     };
   },
 

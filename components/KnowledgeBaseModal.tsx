@@ -1,12 +1,13 @@
 import React, { useState, useCallback, useContext } from 'react';
-import { KnowledgeFile, ProcessedFileResult, KnowledgeBaseContextType } from '../types';
+import { KnowledgeFile, ProcessedFileResult, KnowledgeBaseContextType, AuthContextType } from '../types';
 import CloseIcon from './icons/CloseIcon';
 import UploadIcon from './icons/UploadIcon';
 import FileIcon from './icons/FileIcon';
 import DeleteIcon from './icons/DeleteIcon';
 import SpinnerIcon from './icons/SpinnerIcon';
-import { KnowledgeBaseContext } from '../AppShell';
+import { KnowledgeBaseContext, AuthContext } from '../AppShell';
 import { extractTextFromFile } from '../services/geminiService';
+import { databaseService } from '../services/databaseService';
 
 interface KnowledgeBaseModalProps {
   isOpen: boolean;
@@ -22,6 +23,7 @@ const KnowledgeBaseModal: React.FC<KnowledgeBaseModalProps> = ({ isOpen, onClose
   const [deletingFileName, setDeletingFileName] = useState<string | null>(null);
 
   const { knowledgeFiles, deleteKnowledgeFile, isLoading: isKbLoading } = useContext(KnowledgeBaseContext) as KnowledgeBaseContextType;
+  const { currentUser } = useContext(AuthContext) as AuthContextType;
 
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -30,98 +32,86 @@ const KnowledgeBaseModal: React.FC<KnowledgeBaseModalProps> = ({ isOpen, onClose
     }
   };
 
+  const processAndUploadFile = async (file: File): Promise<ProcessedFileResult> => {
+    const fileType = file.type;
+    const fileName = file.name;
+    let content: string | null = null;
+    let status: 'processed' | 'error' | 'unsupported' = 'unsupported';
+    let storagePath: string | undefined = undefined;
+
+    const isSupportedForTextExtraction = ['text/csv', 'text/plain', 'application/pdf'].includes(fileType);
+
+    try {
+      // Step 1: Upload the original file to storage first
+      // We do this for all supported types so the original is always available
+      if (isSupportedForTextExtraction) {
+        if (!currentUser) {
+            throw new Error("Authentication error: User must be logged in to upload files.");
+        }
+        const uploadResult = await databaseService.uploadFile(file, currentUser.id);
+        storagePath = uploadResult.path;
+      }
+
+      // Step 2: Extract text content
+      if (fileType === 'text/csv' || fileType === 'text/plain') {
+        content = await file.text();
+        status = 'processed';
+      } else if (fileType === 'application/pdf') {
+        const reader = new FileReader();
+        content = await new Promise<string>((resolve, reject) => {
+          reader.onload = async (e) => {
+            if (e.target?.result) {
+              const extracted = await extractTextFromFile(e.target.result as string, fileType);
+              const trimmedExtracted = extracted.trim();
+              const NO_TEXT_TOKEN = '[[NO_TEXT_FOUND]]';
+
+              if (extracted && trimmedExtracted.length > 0 && trimmedExtracted !== NO_TEXT_TOKEN) {
+                  resolve(extracted);
+              } else if (trimmedExtracted === NO_TEXT_TOKEN) {
+                  // Successfully processed, but no text was found. This is not an error.
+                  resolve(''); 
+              } else {
+                  // The model failed to respond or returned an empty string against instructions. This is an error.
+                  reject(new Error('Failed to extract text from PDF. The model returned an empty or invalid response.'));
+              }
+            } else {
+              reject(new Error('Failed to read PDF file.'));
+            }
+          };
+          reader.onerror = () => reject(new Error('FileReader error.'));
+          reader.readAsDataURL(file);
+        });
+        status = 'processed';
+      }
+    } catch (error) {
+      console.error(`Error processing file ${fileName}:`, error);
+      status = 'error';
+      content = (error as Error).message;
+      // If upload succeeded but text extraction failed, delete the orphaned file
+      if (storagePath) {
+        await databaseService.deleteFile(storagePath);
+        storagePath = undefined;
+      }
+    }
+    
+    return {
+      fileInfo: { name: fileName, type: fileType, status, storagePath },
+      content,
+    };
+  };
+
   const processFiles = useCallback(async () => {
     if (files.length === 0) return;
     
     setIsProcessing(true);
-    const results: ProcessedFileResult[] = [];
 
-    const filePromises = files.map(file => {
-      return new Promise<void>((resolve) => {
-        const fileType = file.type;
-        const fileName = file.name;
-
-        if (fileType === 'text/csv' || fileType === 'text/plain') {
-          const reader = new FileReader();
-          
-          reader.onload = () => {
-            results.push({
-              fileInfo: { name: fileName, type: fileType, status: 'processed' },
-              content: reader.result as string,
-            });
-            resolve();
-          };
-
-          reader.onerror = () => {
-            results.push({
-              fileInfo: { name: fileName, type: fileType, status: 'error' },
-              content: null,
-            });
-            resolve();
-          };
-          
-          reader.readAsText(file);
-        } else if (fileType === 'application/pdf') { 
-          const reader = new FileReader();
-
-          reader.onload = async (e) => {
-            if (e.target?.result) {
-              try {
-                const extractedText = await extractTextFromFile(e.target.result as string, fileType);
-                
-                if (extractedText && extractedText.trim().length > 0) {
-                  results.push({
-                    fileInfo: { name: fileName, type: fileType, status: 'processed' },
-                    content: extractedText,
-                  });
-                } else {
-                  console.warn(`Gemini returned no text for ${fileName}. Marking as error.`);
-                  results.push({
-                    fileInfo: { name: fileName, type: fileType, status: 'error' },
-                    content: 'Failed to extract text from PDF.',
-                  });
-                }
-              } catch (error) {
-                console.error(`Error processing PDF ${fileName} with Gemini:`, error);
-                results.push({
-                  fileInfo: { name: fileName, type: fileType, status: 'error' },
-                  content: 'An error occurred during PDF processing.',
-                });
-              }
-            } else {
-              results.push({
-                  fileInfo: { name: fileName, type: fileType, status: 'error' },
-                  content: 'Failed to read PDF file.',
-              });
-            }
-            resolve();
-          };
-
-          reader.onerror = () => {
-              results.push({
-                fileInfo: { name: fileName, type: fileType, status: 'error' },
-                content: null,
-              });
-              resolve();
-          };
-
-          reader.readAsDataURL(file);
-        } else {
-          results.push({
-            fileInfo: { name: fileName, type: fileType, status: 'unsupported' },
-            content: null,
-          });
-          resolve();
-        }
-      });
-    });
-
-    await Promise.all(filePromises);
+    const filePromises = files.map(file => processAndUploadFile(file));
+    const results = await Promise.all(filePromises);
     
     onFilesProcess(results);
     setIsProcessing(false);
     setFiles([]); 
-  }, [files, onFilesProcess]);
+  }, [files, onFilesProcess, currentUser]);
   
   const handleDrag = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -151,7 +141,6 @@ const KnowledgeBaseModal: React.FC<KnowledgeBaseModalProps> = ({ isOpen, onClose
               setFileToDelete(null); // Close confirmation on success
           } catch (error) {
               console.error("Deletion failed in modal:", error);
-              // Optionally show an error message to the user here
           } finally {
               setDeletingFileName(null);
           }
@@ -235,7 +224,7 @@ const KnowledgeBaseModal: React.FC<KnowledgeBaseModalProps> = ({ isOpen, onClose
           )}
 
           <div className="mt-6 pt-6 border-t border-gray-700">
-              <h3 className="font-semibold text-gray-300 mb-3">Current Files in Knowledge Base</h3>
+              <h3 className="font-semibold text-gray-300 mb-3">Current Files</h3>
               {isKbLoading && knowledgeFiles.length === 0 ? (
                   <div className="flex justify-center items-center py-4">
                       <SpinnerIcon className="w-6 h-6 text-gray-400" />
@@ -258,7 +247,7 @@ const KnowledgeBaseModal: React.FC<KnowledgeBaseModalProps> = ({ isOpen, onClose
                       ))}
                   </div>
               ) : (
-                  <p className="text-sm text-gray-500 text-center py-4">The knowledge base is empty.</p>
+                  <p className="text-sm text-gray-500 text-center py-4">No information has been uploaded yet.</p>
               )}
           </div>
         </main>
@@ -267,9 +256,9 @@ const KnowledgeBaseModal: React.FC<KnowledgeBaseModalProps> = ({ isOpen, onClose
           <button 
             onClick={processFiles}
             disabled={files.length === 0 || isProcessing || isKbLoading}
-            className="bg-indigo-600 text-white px-6 py-2 rounded-lg hover:bg-indigo-500 transition-colors duration-200 disabled:bg-gray-600 disabled:cursor-not-allowed font-semibold"
+            className="bg-indigo-600 text-white px-6 py-2 rounded-lg hover:bg-indigo-500 transition-colors duration-200 disabled:bg-gray-600 disabled:cursor-not-allowed font-semibold w-48 flex items-center justify-center"
           >
-            {isProcessing ? 'Processing...' : 'Upload and Process'}
+            {isProcessing ? <SpinnerIcon className="w-5 h-5" /> : 'Upload and Process'}
           </button>
         </footer>
       </div>
